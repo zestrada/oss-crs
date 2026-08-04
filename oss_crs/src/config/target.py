@@ -26,6 +26,9 @@ class TargetSanitizer(Enum):
     ASAN = "address"
     MSAN = "memory"
     UBSAN = "undefined"
+    # Dropping this and defaulting to "address" breaks javascript builds:
+    # oss-fuzz's `compile` rejects any sanitizer other than "none"/"coverage".
+    NONE = "none"
 
 
 # See https://google.github.io/oss-fuzz/getting-started/new-project-guide/#architectures

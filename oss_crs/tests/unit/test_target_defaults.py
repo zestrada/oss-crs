@@ -80,6 +80,19 @@ def test_target_env_prefers_libfuzzer_engine_when_listed(tmp_path: Path) -> None
     assert env["engine"] == "libfuzzer"
 
 
+def test_sanitizers_none_is_honored(tmp_path: Path) -> None:
+    """`sanitizers: [none]` resolves to "none" so javascript builds are not rejected."""
+    proj = tmp_path / "proj"
+    proj.mkdir(parents=True, exist_ok=True)
+    (proj / "project.yaml").write_text(
+        "language: javascript\nfuzzing_engines: [libfuzzer]\nsanitizers: [none]\n"
+    )
+    target = Target(tmp_path / "work", proj, None)
+    env = target.get_target_env()
+    assert env["language"] == "javascript"
+    assert env["sanitizer"] == "none"
+
+
 def test_target_env_falls_back_when_project_yaml_invalid(tmp_path: Path) -> None:
     proj = tmp_path / "proj"
     proj.mkdir(parents=True, exist_ok=True)
