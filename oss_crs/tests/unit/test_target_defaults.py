@@ -149,6 +149,106 @@ def test_known_base_os_version_does_not_warn(tmp_path: Path, capsys) -> None:
     assert "Unknown base_os_version" not in (captured.out + captured.err)
 
 
+def test_invalid_language_keeps_other_project_yaml_fields(
+    tmp_path: Path, capsys
+) -> None:
+    """One unsupported value must not discard the rest of the file.
+
+    Losing base_os_version silently selects base-runner:latest -> GLIBC mismatch.
+    """
+    proj = tmp_path / "proj"
+    proj.mkdir(parents=True, exist_ok=True)
+    (proj / "project.yaml").write_text(
+        "\n".join(
+            [
+                "language: not-a-real-language",
+                "main_repo: 'https://example.com/x.git'",
+                "base_os_version: ubuntu-24-04",
+                "sanitizers: [memory]",
+            ]
+        )
+        + "\n"
+    )
+    target = Target(tmp_path / "work", proj, None)
+    env = target.get_target_env()
+    assert env["language"] == "c"  # only the bad field falls back
+    assert env["sanitizer"] == "memory"
+    assert target.base_os_version == "ubuntu-24-04"
+    assert target.main_repo == "https://example.com/x.git"
+    captured = capsys.readouterr()
+    assert "ignoring invalid 'language'" in (captured.out + captured.err)
+
+
+def test_invalid_sanitizer_does_not_discard_unrelated_fields(tmp_path: Path) -> None:
+    """A typo in one field must not reach across to unrelated fields."""
+    proj = tmp_path / "proj"
+    proj.mkdir(parents=True, exist_ok=True)
+    (proj / "project.yaml").write_text(
+        "\n".join(
+            [
+                "language: c++",
+                "main_repo: 'https://example.com/x.git'",
+                "base_os_version: ubuntu-24-04",
+                "sanitizers: [addres]",
+            ]
+        )
+        + "\n"
+    )
+    target = Target(tmp_path / "work", proj, None)
+    env = target.get_target_env()
+    assert env["language"] == "c++"
+    assert env["sanitizer"] == "address"  # only the bad field falls back
+    assert target.base_os_version == "ubuntu-24-04"
+    assert target.main_repo == "https://example.com/x.git"
+
+
+def test_project_yaml_without_language_keeps_remaining_fields(tmp_path: Path) -> None:
+    """project.yaml is optional metadata, so language may be omitted entirely."""
+    proj = tmp_path / "proj"
+    proj.mkdir(parents=True, exist_ok=True)
+    (proj / "project.yaml").write_text(
+        "main_repo: 'https://example.com/x.git'\nbase_os_version: ubuntu-24-04\n"
+    )
+    target = Target(tmp_path / "work", proj, None)
+    assert target.language == "c"  # framework default
+    assert target.base_os_version == "ubuntu-24-04"
+    assert target.main_repo == "https://example.com/x.git"
+
+
+def test_empty_project_yaml_uses_framework_defaults(tmp_path: Path) -> None:
+    proj = tmp_path / "proj"
+    proj.mkdir(parents=True, exist_ok=True)
+    (proj / "project.yaml").write_text("")
+    target = Target(tmp_path / "work", proj, None)
+    env = target.get_target_env()
+    assert env["language"] == "c"
+    assert env["sanitizer"] == "address"
+
+
+def test_non_mapping_project_yaml_uses_framework_defaults(
+    tmp_path: Path, capsys
+) -> None:
+    proj = tmp_path / "proj"
+    proj.mkdir(parents=True, exist_ok=True)
+    (proj / "project.yaml").write_text("- just\n- a\n- list\n")
+    target = Target(tmp_path / "work", proj, None)
+    assert target.get_target_env()["language"] == "c"
+    captured = capsys.readouterr()
+    assert "not a YAML mapping" in (captured.out + captured.err)
+
+
+def test_unparseable_project_yaml_uses_framework_defaults(
+    tmp_path: Path, capsys
+) -> None:
+    proj = tmp_path / "proj"
+    proj.mkdir(parents=True, exist_ok=True)
+    (proj / "project.yaml").write_text("language: [c\n")  # unterminated flow sequence
+    target = Target(tmp_path / "work", proj, None)
+    assert target.get_target_env()["language"] == "c"
+    captured = capsys.readouterr()
+    assert "Failed to parse" in (captured.out + captured.err)
+
+
 def test_user_provided_missing_repo_path_fails_init(tmp_path: Path) -> None:
     proj = tmp_path / "proj"
     proj.mkdir(parents=True, exist_ok=True)

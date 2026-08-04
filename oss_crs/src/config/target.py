@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: MIT
 from enum import Enum
 from pathlib import Path
-from typing import Optional
+from typing import Annotated, Any, Optional
 
 import yaml
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 
 
 # See https://google.github.io/oss-fuzz/getting-started/new-project-guide/#language
@@ -109,3 +109,40 @@ class TargetConfig(BaseModel):
     def from_dict(cls, data: dict) -> "TargetConfig":
         """Parse Target config from dictionary."""
         return cls.model_validate(data)
+
+    @classmethod
+    def validated_fields(cls, data: dict) -> tuple[dict[str, Any], list[str]]:
+        """Validate each declared field independently.
+
+        Returns ``(values, warnings)``: only the fields that were present and
+        valid, plus a message for each one dropped. Absent fields are omitted
+        rather than reported. Lenient counterpart to ``from_dict`` -- use that
+        when the whole document must be valid.
+
+        Field-level type and ``Field()`` constraints are enforced; model-level
+        ``field_validator``/``model_validator`` hooks are not, since each field is
+        validated in isolation. Add any such hook to ``from_dict``'s path too.
+        """
+        values: dict[str, Any] = {}
+        warnings: list[str] = []
+        for name, field in cls.model_fields.items():
+            if data.get(name) is None:
+                continue
+            try:
+                values[name] = TypeAdapter(
+                    Annotated[field.annotation, field]
+                ).validate_python(data[name])
+            except ValidationError as exc:
+                warnings.append(
+                    f"ignoring invalid '{name}' ({_first_error(exc)}); "
+                    "falling back to the framework default"
+                )
+        return values, warnings
+
+
+def _first_error(exc: ValidationError) -> str:
+    """Summarize a ValidationError as its first underlying message."""
+    errors = exc.errors()
+    if not errors:
+        return str(exc)
+    return str(errors[0].get("msg", exc))

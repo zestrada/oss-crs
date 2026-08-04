@@ -9,6 +9,7 @@ import subprocess
 import uuid
 import git
 import fcntl
+import yaml
 from contextlib import contextmanager
 
 from .config.target import FuzzingEngine, TargetConfig, TargetSanitizer
@@ -183,6 +184,9 @@ class Target:
     def _load_project_yaml_defaults(self) -> None:
         """Load optional OSS-Fuzz project.yaml defaults.
 
+        Fields are validated independently; only an unreadable or non-mapping
+        file discards everything.
+
         Precedence is enforced by callers via env merge policy:
         compose additional_env > project.yaml > framework defaults.
         """
@@ -190,15 +194,30 @@ class Target:
         if not project_yaml.exists():
             return
         try:
-            cfg = TargetConfig.from_yaml_file(project_yaml)
+            with open(project_yaml.resolve(), "r") as f:
+                data = yaml.safe_load(f)
         except Exception as exc:
             log_warning(
                 f"Failed to parse {project_yaml}; falling back to framework defaults. ({type(exc).__name__}: {exc})"
             )
             return
 
-        self.main_repo = cfg.main_repo
-        self.base_os_version = cfg.base_os_version
+        if data is None:
+            return
+        if not isinstance(data, dict):
+            log_warning(
+                f"{project_yaml} is not a YAML mapping; falling back to framework defaults."
+            )
+            return
+
+        cfg, warnings = TargetConfig.validated_fields(data)
+        for warning in warnings:
+            log_warning(f"In {project_yaml}: {warning}.")
+
+        if "main_repo" in cfg:
+            self.main_repo = cfg["main_repo"]
+        if "base_os_version" in cfg:
+            self.base_os_version = cfg["base_os_version"]
         if self.base_os_version not in KNOWN_BASE_OS_VERSIONS:
             log_warning(
                 f"Unknown base_os_version '{self.base_os_version}' in {project_yaml}; "
@@ -206,21 +225,22 @@ class Target:
                 f"(known values: {', '.join(sorted(KNOWN_BASE_OS_VERSIONS))}). "
                 f"The runner image pull will fail if that tag does not exist."
             )
-        self.language = cfg.language.value
-        if cfg.fuzzing_engines:
+        if "language" in cfg:
+            self.language = cfg["language"].value
+        if cfg.get("fuzzing_engines"):
             # Prefer "libfuzzer" if listed; otherwise use first entry
-            if FuzzingEngine.LIBFUZZER in cfg.fuzzing_engines:
+            if FuzzingEngine.LIBFUZZER in cfg["fuzzing_engines"]:
                 self.engine = FuzzingEngine.LIBFUZZER.value
             else:
-                self.engine = cfg.fuzzing_engines[0].value
-        if cfg.sanitizers:
+                self.engine = cfg["fuzzing_engines"][0].value
+        if cfg.get("sanitizers"):
             # Prefer "address" if listed; otherwise use first entry
-            if TargetSanitizer.ASAN in cfg.sanitizers:
+            if TargetSanitizer.ASAN in cfg["sanitizers"]:
                 self.sanitizer = TargetSanitizer.ASAN.value
             else:
-                self.sanitizer = cfg.sanitizers[0].value
-        if cfg.architectures:
-            self.architecture = cfg.architectures[0].value
+                self.sanitizer = cfg["sanitizers"][0].value
+        if cfg.get("architectures"):
+            self.architecture = cfg["architectures"][0].value
 
     @property
     def _has_repo(self) -> bool:
