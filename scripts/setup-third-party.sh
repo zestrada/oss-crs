@@ -21,11 +21,14 @@ fi
 
 echo "Fetching oss-fuzz via sparse checkout..."
 mkdir -p "$THIRD_PARTY"
-git clone --filter=blob:none --sparse "$OSS_FUZZ_REPO" "$OSS_FUZZ_DIR"
+# Not `clone --sparse`: git 2.25.x misparses the URL as a path (fixed in 2.26).
+# Not `--depth=1`: OSS_FUZZ_COMMIT may be unreachable in a shallow clone.
+git clone --filter=blob:none --no-checkout "$OSS_FUZZ_REPO" "$OSS_FUZZ_DIR"
 cd "$OSS_FUZZ_DIR"
-git checkout "$OSS_FUZZ_COMMIT"
+git sparse-checkout init --cone
 git sparse-checkout set \
     infra/base-images/base-builder \
     infra/base-images/base-runner
+git checkout "$OSS_FUZZ_COMMIT"
 
 echo "Done. oss-fuzz checked out to $OSS_FUZZ_DIR"

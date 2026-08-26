@@ -98,6 +98,10 @@ stricter subset of Keep a Changelog).
   `_relative_repo_hint`).
 
 ### Fixed
+- `scripts/setup-third-party.sh` no longer fails on git < 2.26, where
+  `git clone --sparse` misparses the remote URL as a path
+  (`fatal: cannot change to '<url>'`). The oss-fuzz sparse checkout is now
+  initialized in a separate step, which works on every git version.
 - Runner/builder OS mismatch for targets pinned to a newer base image. Fixes glibc symbol mismatch errors
 - Builder and runner sidecar APIs now reject path-like CRS, harness, and
   rebuild identifiers before using them to resolve artifact paths.
