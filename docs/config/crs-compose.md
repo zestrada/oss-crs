@@ -44,6 +44,33 @@ llm_config:                    # optional
     local_path: <path>       # Cannot be combined with url/ref
 ```
 
+## Paths
+
+`local_path` and `config_path` (including the legacy `llm_config.litellm_config`
+key) accept absolute paths, `~`-prefixed paths, and relative paths. A relative
+path is looked up in two places, and the first match wins:
+
+1. The directory containing the compose file. This lets a compose file live
+   next to the files it references and be run from anywhere.
+2. The current working directory. This keeps repo-root-style paths such as
+   `./example/<name>/litellm-config.yaml` working when run from the repo root.
+
+A `config_path` matches if it is an existing file; a `local_path` matches if
+it contains `oss-crs/crs.yaml`. If neither location matches, `config_path`
+reports both locations it tried, and `local_path` uses the compose-relative
+location.
+
+```yaml
+crs-my-crs:
+  source:
+    local_path: ../crs/crs-my-crs           # sibling of the compose file's directory
+llm_config:
+  litellm:
+    mode: internal
+    internal:
+      config_path: ./litellm-config.yaml    # next to the compose file
+```
+
 ## Configuration Fields
 
 ### `llm_config` (optional)
@@ -54,7 +81,7 @@ Controls LiteLLM integration mode.
   - No OSS-CRS-managed LiteLLM validation or sidecars.
 - `litellm.mode=internal`:
   - Internal LiteLLM mode (OSS-CRS starts LiteLLM/postgres/key-gen services).
-  - `internal.config_path` is optional; if omitted, OSS-CRS uses the default bundled LiteLLM config.
+  - `internal.config_path` is optional; if omitted, OSS-CRS uses the default bundled LiteLLM config. Relative paths are resolved as described in [Paths](#paths).
   - In this mode, OSS-CRS always generates per-CRS LiteLLM keys. `required_llms` only controls model-availability validation.
 - `litellm.mode=external`:
   - External LiteLLM mode (OSS-CRS injects external URL/key into CRS containers, no internal LiteLLM sidecars).
@@ -178,7 +205,7 @@ When provided, you must specify either `url` + `ref` OR `local_path`, but not bo
 |--------------|--------|----------|-------------------------------------------------------|
 | `url`        | string | No*      | Git repository URL (HTTP URL format)                  |
 | `ref`        | string | No*      | Git reference (branch, tag, or commit SHA). Required when `url` is provided |
-| `local_path` | string | No*      | Local filesystem path to the CRS. Cannot be combined with `url` or `ref` |
+| `local_path` | string | No*      | Local filesystem path to the CRS; relative paths are resolved as described in [Paths](#paths). Cannot be combined with `url` or `ref` |
 
 \* Either `url` + `ref` OR `local_path` must be provided when `source` is specified.
 

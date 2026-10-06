@@ -4,8 +4,14 @@ import re
 import json
 from enum import Enum
 from pathlib import Path
-from typing import Any, Optional
-from pydantic import BaseModel, Field, field_validator, model_validator
+from typing import Any, Callable, Optional
+from pydantic import (
+    BaseModel,
+    Field,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 import yaml
 
 from ..cpuset import parse_cpuset, map_cpuset, create_cpu_mapping
@@ -14,6 +20,42 @@ from ..memory import parse_memory
 
 CRS_ENTRY_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 
+# Validation context key holding the directory containing the compose file.
+# Relative paths are looked up there first, then in the CWD.
+BASE_DIR_CONTEXT_KEY = "base_dir"
+
+
+def candidate_paths(v: str, base_dir: Optional[Path]) -> list[Path]:
+    """Return the locations a compose-file path may refer to, in priority order.
+
+    Absolute and ~ paths have a single candidate. A relative path is tried
+    against base_dir (the compose file's directory) and then the CWD.
+    """
+    path = Path(v).expanduser()
+    if path.is_absolute() or base_dir is None:
+        return [path.resolve()]
+    return list(dict.fromkeys([(Path(base_dir) / path).resolve(), path.resolve()]))
+
+
+def resolve_path(
+    v: str, base_dir: Optional[Path], exists: Callable[[Path], bool] = Path.exists
+) -> Path:
+    """Resolve a compose-file path to the first candidate that exists.
+
+    Falls back to the first candidate when none exist, so callers can report it.
+    """
+    candidates = candidate_paths(v, base_dir)
+    return next((p for p in candidates if exists(p)), candidates[0])
+
+
+def _base_dir(info: ValidationInfo) -> Optional[Path]:
+    return (info.context or {}).get(BASE_DIR_CONTEXT_KEY)
+
+
+def _is_crs_dir(path: Path) -> bool:
+    # Mirrors crs.CRS_YAML_PATH (not imported to avoid a circular import).
+    return (path / "oss-crs" / "crs.yaml").is_file()
+
 
 class CRSSource(BaseModel):
     """Source configuration for a CRS entry."""
@@ -21,6 +63,15 @@ class CRSSource(BaseModel):
     url: Optional[str] = None
     ref: Optional[str] = None
     local_path: Optional[str] = None
+
+    @field_validator("local_path")
+    @classmethod
+    def resolve_local_path(
+        cls, v: Optional[str], info: ValidationInfo
+    ) -> Optional[str]:
+        if v is None:
+            return None
+        return str(resolve_path(v, _base_dir(info), exists=_is_crs_dir))
 
     @model_validator(mode="after")
     def validate_source(self):
@@ -117,14 +168,18 @@ class LLMConfig(BaseModel):
 
             @field_validator("config_path")
             @classmethod
-            def validate_config_path(cls, v: Optional[str]) -> Optional[str]:
+            def validate_config_path(
+                cls, v: Optional[str], info: ValidationInfo
+            ) -> Optional[str]:
                 if v is None:
                     return None
-                path = Path(v).expanduser().resolve()
-                if not path.exists():
-                    raise ValueError(f"config_path does not exist: '{v}'")
-                if not path.is_file():
-                    raise ValueError(f"config_path is not a file: '{v}'")
+                candidates = candidate_paths(v, _base_dir(info))
+                path = next((p for p in candidates if p.is_file()), None)
+                if path is None:
+                    tried = ", ".join(f"'{p}'" for p in candidates)
+                    raise ValueError(
+                        f"config_path '{v}' is not an existing file (tried {tried})"
+                    )
                 return str(path)
 
         class ExternalConfig(BaseModel):
@@ -199,20 +254,34 @@ class CRSComposeConfig(BaseModel):
         return v
 
     @classmethod
-    def from_yaml(cls, yaml_content: str) -> "CRSComposeConfig":
-        """Parse CRS Compose config from YAML string."""
+    def from_yaml(
+        cls, yaml_content: str, base_dir: Optional[Path] = None
+    ) -> "CRSComposeConfig":
+        """Parse CRS Compose config from YAML string.
+
+        Relative paths resolve against base_dir, or the CWD if it is None.
+        """
         data = yaml.safe_load(yaml_content)
-        return cls.from_dict(data)
+        return cls.from_dict(data, base_dir=base_dir)
 
     @classmethod
     def from_yaml_file(cls, filepath: str | Path) -> "CRSComposeConfig":
-        """Parse CRS Compose config from YAML file."""
-        with open(Path(filepath), "r") as f:
-            return cls.from_yaml(f.read())
+        """Parse CRS Compose config from YAML file.
+
+        Relative paths resolve against the directory containing the file.
+        """
+        filepath = Path(filepath)
+        with open(filepath, "r") as f:
+            return cls.from_yaml(f.read(), base_dir=filepath.resolve().parent)
 
     @classmethod
-    def from_dict(cls, data: dict) -> "CRSComposeConfig":
-        """Parse CRS Compose config from dictionary."""
+    def from_dict(
+        cls, data: dict, base_dir: Optional[Path] = None
+    ) -> "CRSComposeConfig":
+        """Parse CRS Compose config from dictionary.
+
+        Relative paths resolve against base_dir, or the CWD if it is None.
+        """
         RUN_ENV = "run_env"
         DOCKER_REGISTRY = "docker_registry"
         OSS_CRS_INFRA = "oss_crs_infra"
@@ -247,7 +316,8 @@ class CRSComposeConfig(BaseModel):
             "crs_entries": crs_entries,
             LLM_CONFIG: llm_config,
         }
-        config = cls.model_validate(payload)
+        context = {BASE_DIR_CONTEXT_KEY: base_dir} if base_dir is not None else None
+        config = cls.model_validate(payload, context=context)
 
         # Resolve missing sources from registry
         for name, entry in config.crs_entries.items():

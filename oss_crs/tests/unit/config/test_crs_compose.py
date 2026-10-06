@@ -212,6 +212,194 @@ class TestCRSComposeConfigEntryNames:
             CRSComposeConfig.from_dict(self._compose_data(crs_name))
 
 
+class TestRelativePathResolution:
+    """Relative paths in a compose file resolve against the file's directory."""
+
+    COMPOSE_YAML = """\
+run_env: local
+docker_registry: local
+oss_crs_infra:
+  cpuset: "0-1"
+  memory: 8G
+my-crs:
+  cpuset: "2-3"
+  memory: 8G
+  source:
+    local_path: ../crs/my-crs
+llm_config:
+  litellm:
+    mode: internal
+    internal:
+      config_path: ../config/litellm-config.yaml
+"""
+
+    @pytest.fixture
+    def layout(self, tmp_path):
+        compose_dir = tmp_path / "compose"
+        compose_dir.mkdir()
+        (tmp_path / "config").mkdir()
+        litellm_file = tmp_path / "config" / "litellm-config.yaml"
+        litellm_file.write_text("model_list: []\n")
+        compose_file = compose_dir / "compose.yaml"
+        compose_file.write_text(self.COMPOSE_YAML)
+        return tmp_path, compose_file, litellm_file
+
+    def test_from_yaml_file_resolves_against_compose_dir(self, layout, monkeypatch):
+        root, compose_file, litellm_file = layout
+        # Run from an unrelated directory to prove the CWD is not used.
+        other = root / "elsewhere"
+        other.mkdir()
+        monkeypatch.chdir(other)
+
+        config = CRSComposeConfig.from_yaml_file(compose_file)
+
+        assert config.crs_entries["my-crs"].source.local_path == str(
+            (root / "crs" / "my-crs").resolve()
+        )
+        assert config.llm_config.litellm.internal.config_path == str(
+            litellm_file.resolve()
+        )
+
+    def test_legacy_litellm_config_key_resolves_against_compose_dir(
+        self, layout, monkeypatch
+    ):
+        root, compose_file, litellm_file = layout
+        compose_file.write_text(
+            self.COMPOSE_YAML.split("llm_config:")[0]
+            + "llm_config:\n  litellm_config: ../config/litellm-config.yaml\n"
+        )
+        monkeypatch.chdir(root)
+
+        config = CRSComposeConfig.from_yaml_file(compose_file)
+
+        assert config.llm_config.litellm.internal.config_path == str(
+            litellm_file.resolve()
+        )
+
+    def test_absolute_paths_unchanged(self, tmp_path):
+        litellm_file = tmp_path / "litellm.yaml"
+        litellm_file.write_text("model_list: []\n")
+        data = {
+            "run_env": "local",
+            "docker_registry": "local",
+            "oss_crs_infra": {"cpuset": "0-1", "memory": "8G"},
+            "llm_config": {
+                "litellm": {
+                    "mode": "internal",
+                    "internal": {"config_path": str(litellm_file)},
+                }
+            },
+            "my-crs": {
+                "cpuset": "2-3",
+                "memory": "8G",
+                "source": {"local_path": "/tmp/dummy-crs"},
+            },
+        }
+        config = CRSComposeConfig.from_dict(data, base_dir=tmp_path / "unrelated")
+
+        assert config.crs_entries["my-crs"].source.local_path == "/tmp/dummy-crs"
+        assert config.llm_config.litellm.internal.config_path == str(litellm_file)
+
+    def test_from_dict_without_base_dir_uses_cwd(self, tmp_path, monkeypatch):
+        (tmp_path / "litellm.yaml").write_text("model_list: []\n")
+        monkeypatch.chdir(tmp_path)
+        data = {
+            "run_env": "local",
+            "docker_registry": "local",
+            "oss_crs_infra": {"cpuset": "0-1", "memory": "8G"},
+            "llm_config": {"litellm_config": "litellm.yaml"},
+            "my-crs": {
+                "cpuset": "2-3",
+                "memory": "8G",
+                "source": {"local_path": "crs"},
+            },
+        }
+        config = CRSComposeConfig.from_dict(data)
+
+        assert config.crs_entries["my-crs"].source.local_path == str(
+            (tmp_path / "crs").resolve()
+        )
+        assert config.llm_config.litellm.internal.config_path == str(
+            (tmp_path / "litellm.yaml").resolve()
+        )
+
+    def test_missing_relative_config_path_reports_both_candidates(
+        self, layout, monkeypatch
+    ):
+        root, compose_file, litellm_file = layout
+        litellm_file.unlink()
+        monkeypatch.chdir(root)
+
+        with pytest.raises(ValidationError, match="is not an existing file") as exc:
+            CRSComposeConfig.from_yaml_file(compose_file)
+        # Compose-relative candidate, then CWD-relative candidate.
+        assert str(root / "config" / "litellm-config.yaml") in str(exc.value)
+        assert str(root.parent / "config" / "litellm-config.yaml") in str(exc.value)
+
+    def test_falls_back_to_cwd_relative_paths(self, tmp_path, monkeypatch):
+        """Repo-root-style paths keep working when run from that root."""
+        example_dir = tmp_path / "example" / "foo"
+        example_dir.mkdir(parents=True)
+        litellm_file = example_dir / "litellm-config.yaml"
+        litellm_file.write_text("model_list: []\n")
+        crs_dir = tmp_path / "crs" / "my-crs"
+        (crs_dir / "oss-crs").mkdir(parents=True)
+        (crs_dir / "oss-crs" / "crs.yaml").write_text("name: my-crs\n")
+        compose_file = example_dir / "compose.yaml"
+        compose_file.write_text(
+            self.COMPOSE_YAML.replace("../crs/my-crs", "./crs/my-crs").replace(
+                "../config/litellm-config.yaml",
+                "./example/foo/litellm-config.yaml",
+            )
+        )
+        monkeypatch.chdir(tmp_path)
+
+        config = CRSComposeConfig.from_yaml_file(compose_file)
+
+        assert config.crs_entries["my-crs"].source.local_path == str(crs_dir.resolve())
+        assert config.llm_config.litellm.internal.config_path == str(
+            litellm_file.resolve()
+        )
+
+    def test_compose_relative_wins_over_cwd_relative(self, tmp_path, monkeypatch):
+        compose_dir = tmp_path / "compose"
+        compose_dir.mkdir()
+        (compose_dir / "litellm-config.yaml").write_text("model_list: []\n")
+        cwd = tmp_path / "cwd"
+        cwd.mkdir()
+        (cwd / "litellm-config.yaml").write_text("model_list: []\n")
+        compose_file = compose_dir / "compose.yaml"
+        compose_file.write_text(
+            self.COMPOSE_YAML.replace(
+                "../config/litellm-config.yaml", "./litellm-config.yaml"
+            )
+        )
+        monkeypatch.chdir(cwd)
+
+        config = CRSComposeConfig.from_yaml_file(compose_file)
+
+        assert config.llm_config.litellm.internal.config_path == str(
+            (compose_dir / "litellm-config.yaml").resolve()
+        )
+
+    def test_local_path_fallback_requires_crs_yaml(self, tmp_path, monkeypatch):
+        """A bare directory in the CWD is not mistaken for the CRS."""
+        compose_dir = tmp_path / "compose"
+        compose_dir.mkdir()
+        (tmp_path / "my-crs").mkdir()  # no oss-crs/crs.yaml
+        compose_file = compose_dir / "compose.yaml"
+        compose_file.write_text(
+            self.COMPOSE_YAML.split("llm_config:")[0].replace("../crs/my-crs", "my-crs")
+        )
+        monkeypatch.chdir(tmp_path)
+
+        config = CRSComposeConfig.from_yaml_file(compose_file)
+
+        assert config.crs_entries["my-crs"].source.local_path == str(
+            (compose_dir / "my-crs").resolve()
+        )
+
+
 class TestRemoveKeys:
     """Tests for remove_keys - verifies recursive key removal."""
 

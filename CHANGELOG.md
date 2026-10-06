@@ -8,6 +8,7 @@ stricter subset of Keep a Changelog).
 
 ### Changed
 
+- Relative `source.local_path` and `llm_config.litellm.internal.config_path` (and legacy `llm_config.litellm_config`) in a compose file are now looked up relative to the compose file's directory first, then the current working directory, so a compose file can reference out-of-tree CRSs and configs next to it. Existing CWD-relative paths keep working. Compose files with a relative `local_path` get a new work-dir hash, so `oss-crs prepare` must be re-run for them. Registry `local_path` entries are unchanged.
 - Auditing CRS type: does not require a target harness and produces bug-candidates
 - `oss-crs export` and `oss-crs import` commands — imports/exports docker images/CRS source code to transfer to another host.
 - Run-phase modules now default to `target_dependent: true`, so their images are built once per target during `build-target`. Set `target_dependent: false` for modules that can be built once during `prepare`.

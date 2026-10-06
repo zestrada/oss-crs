@@ -8,7 +8,7 @@ import argparse
 from pathlib import Path
 from dotenv import load_dotenv
 from ..crs_compose import ArtifactInput, CRSCompose, RUN_ARTIFACT_INPUT_SPECS
-from ..config.crs_compose import CRSComposeConfig
+from ..config.crs_compose import CRSComposeConfig, resolve_path
 from ..target import Target
 from ..constants import WEBUI_CONTAINER_NAME, WEBUI_DEFAULT_PORT
 from ..utils import get_console, log_success, log_error, log_warning, log_dim
@@ -795,7 +795,7 @@ def _handle_gen_compose(args) -> bool:
             print(f"No changes needed: {litellm_config_path}")
 
     # 6. Validate through CRSComposeConfig and write output
-    config = CRSComposeConfig.from_dict(data)
+    config = CRSComposeConfig.from_dict(data, base_dir=example_dir)
     config.to_yaml_file(args.compose_output)
     print(f"Generated compose file: {args.compose_output}")
     return True
@@ -804,8 +804,9 @@ def _handle_gen_compose(args) -> bool:
 def _resolve_litellm_config_path(data: dict, example_dir: Path) -> "Path | None":
     """Resolve the litellm config file path from compose data.
 
-    Looks at llm_config.litellm.internal.config_path. If it's a relative path,
-    resolves it relative to the repo root (parent of example_dir's parent).
+    Looks at llm_config.litellm.internal.config_path. A relative path is
+    resolved against example_dir (the directory containing the compose file),
+    falling back to the CWD.
     Falls back to the default bundled config if no config_path is specified.
     """
     from ..llm import DEFAULT_LITELLM_CONFIG_PATH
@@ -824,19 +825,7 @@ def _resolve_litellm_config_path(data: dict, example_dir: Path) -> "Path | None"
     if config_path is None:
         return DEFAULT_LITELLM_CONFIG_PATH
 
-    path = Path(config_path)
-    if not path.is_absolute():
-        # config_path in examples is relative to repo root (e.g. ./example/foo/litellm-config.yaml)
-        repo_root = (
-            example_dir.parents[0].parent
-            if "example" in example_dir.parts
-            else example_dir
-        )
-        # Walk up from example_dir to find repo root (directory containing "example/")
-        repo_root = Path(__file__).resolve().parents[3]
-        path = (repo_root / config_path).resolve()
-
-    return path
+    return resolve_path(config_path, example_dir)
 
 
 def _warn_deprecated_cli_aliases(argv: list[str]) -> None:
